@@ -1,6 +1,6 @@
 # My submission for 2023 round 2 for autotrader
 
-My submission utilizing a delta neutral market making strategy and dynamicly selecting lot volume.
+My submission utilizing a delta neutral market making strategy and dynamically selecting lot volume.
 
 # Ready Trader Go Description
 
