@@ -18,20 +18,97 @@
 #ifndef CPPREADY_TRADER_GO_AUTOTRADER_H
 #define CPPREADY_TRADER_GO_AUTOTRADER_H
 
-#include <math.h>
 #include <ready_trader_go/baseautotrader.h>
 #include <ready_trader_go/types.h>
 
 #include <array>
 #include <boost/asio/io_context.hpp>
 #include <boost/circular_buffer.hpp>
-#include <memory>
+#include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
+
+#include "ready_trader_go/logging.h"
+
+RTG_INLINE_GLOBAL_LOGGER_WITH_CHANNEL(LG_AT, "AUTO")
+
+// Operator overloads
+
+static constexpr ReadyTraderGo::Side operator!(
+    const ReadyTraderGo::Side &side) {
+  switch (side) {
+    case ReadyTraderGo::Side::BUY:
+      return ReadyTraderGo::Side::SELL;
+    case ReadyTraderGo::Side::SELL:
+      return ReadyTraderGo::Side::BUY;
+  }
+}
+
+// ------------------
+
+class Utilities {
+ public:
+  static inline std::string InstrumentToString(
+      ReadyTraderGo::Instrument instrument) {
+    switch (instrument) {
+      case ReadyTraderGo::Instrument::FUTURE:
+        return "future";
+      case ReadyTraderGo::Instrument::ETF:
+        return "etf";
+      default:
+        return "unknown";
+    }
+  }
+
+  static inline std::string SideToString(ReadyTraderGo::Side side) {
+    switch (side) {
+      case ReadyTraderGo::Side::BUY:
+        return "buy";
+      case ReadyTraderGo::Side::SELL:
+        return "sell";
+      default:
+        return "unknown";
+    }
+  }
+
+  static inline std::string LifespanToString(ReadyTraderGo::Lifespan lifespan) {
+    switch (lifespan) {
+      case ReadyTraderGo::Lifespan::GOOD_FOR_DAY:
+        return "good_for_day";
+      case ReadyTraderGo::Lifespan::FILL_AND_KILL:
+        return "fill_and_kill";
+      default:
+        return "unknown";
+    }
+  }
+};
+
+struct OrderInformation {
+  unsigned long tick;  // Tick it was recorded at
+  unsigned long id;
+  ReadyTraderGo::Side side;
+  unsigned long price;
+  unsigned long volume;
+  ReadyTraderGo::Lifespan lifespan;
+  ReadyTraderGo::Instrument instrument;
+
+  inline static std::string ToString(const OrderInformation &order) {
+    std::stringstream ss;
+    ss << "(Order "
+       << "(tick " << order.tick << ") "
+       << "(id " << order.id << ") "
+       << "(side " << Utilities::SideToString(order.side) << ") "
+       << "(price " << order.price << ") "
+       << "(volume " << order.volume << ") "
+       << "(volume " << Utilities::LifespanToString(order.lifespan) << ")"
+       << ")";
+
+    return ss.str();
+  }
+};
 
 class AutoTrader : public ReadyTraderGo::BaseAutoTrader {
-public:
+ public:
   explicit AutoTrader(boost::asio::io_context &context);
 
   // Called when the execution connection is lost.
@@ -102,78 +179,64 @@ public:
       const std::array<unsigned long, ReadyTraderGo::TOP_LEVEL_COUNT>
           &bidVolumes) override;
 
-  float CalculateSMA(boost::circular_buffer<float> &sma) {
-    if (sma.size() <= 0)
-      return 0.0;
-    long sum = 0;
-    for (auto &el : sma)
-      sum += el;
+  // Send a hedge order
+  void SendHedgeOrder(unsigned long clientOrderId, ReadyTraderGo::Side side,
+                      unsigned long price, unsigned long volume) override;
 
-    return sum / sma.size();
+  // Send a hedge order without needing to track id
+  inline void SendHedgeOrder(ReadyTraderGo::Side side, unsigned long price,
+                             unsigned long volume) {
+    SendHedgeOrder(++mOrderId, side, price, volume);
   }
 
-  void clearAllOrdersBySide(ReadyTraderGo::Side side, bool immutable = false) {
-    // Delete from mOrders if sides matches
-    // for (auto it = mOrders.begin(); it != mOrders.end();) {
-    //     if (std::get<0>(it->second) == side && std::get<3>(it->second)) {
-    //         SendCancelOrder(it->first);
-    //         mOrders.erase(it++);
-    //     } else
-    //         ++it;
-    // }
-    for (auto &[id, tup] : mOrders)
-      SendCancelOrder(id);
+  // Send an hedge order given a OrderInformation struct
+  inline void SendHedgeOrder(OrderInformation &order) {
+    SendHedgeOrder(order.side, order.price, order.volume);
   }
 
-  void clearAllOrders(bool immutable = false) {
-    for (auto &[id, tup] : mOrders)
-      SendCancelOrder(id);
+  // Send an insert order
+  void SendInsertOrder(unsigned long clientOrderId, ReadyTraderGo::Side side,
+                       unsigned long price, unsigned long volume,
+                       ReadyTraderGo::Lifespan lifespan) override;
+
+  // Send an insert order without needing to track id
+  inline void SendInsertOrder(ReadyTraderGo::Side side, unsigned long price,
+                              unsigned long volume,
+                              ReadyTraderGo::Lifespan lifespan) {
+    // Increment orderid and then send
+    // This is tracked internally so no need to worry about multiple trackers
+    SendInsertOrder(++mOrderId, side, price, volume, lifespan);
   }
 
-private:
+  // Send an insert order given a OrderInformation struct
+  inline void SendInsertOrder(OrderInformation order) {
+    SendInsertOrder(order.side, order.price, order.volume, order.lifespan);
+  }
+
+  // Send an amend order on the volume of the order
+  inline void SendAmendOrder(unsigned long clientOrderId,
+                             unsigned long volume) override;
+
+  // Send an amend order on the price or volume of the order. Keep 0 to not
+  // amend By default this actually cancels the order and creates a new one with
+  // the price and volume changed
+  inline unsigned long SendAmendOrderExtended(unsigned long clientOrderId,
+                                              unsigned long price = 0,
+                                              unsigned long volume = 0);
+
+  inline void SendCancelOrder(unsigned long clientOrderId) override;
+
+ private:
   // Ticks since start
-  bool mInitialised = false;
   ulong mTicks = 0;
 
-  // Internal tracking for bid and ask for ETF
-  ulong bidETF, askETF;
-  ulong bidVolETF = 50, askVolETF = 50;
+  // client order, just tracking one order
+  ulong mOrderId = 1;
+  std::unordered_map<ulong, OrderInformation> mOrderBook;
 
   // Position trackers
   long mETFPosition = 0;
   long mFUTPosition = 0;
-
-  // Track when internal bid and ask is updated
-  bool bidUpdated = false, askUpdated = false;
-
-  // Prices
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curETFAskPriceBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curFUTAskPriceBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curETFBidPriceBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curFUTBidPriceBook;
-
-  // Volumes
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curETFAskVolBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curFUTAskVolBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curETFBidVolBook;
-  std::array<ulong, ReadyTraderGo::TOP_LEVEL_COUNT> curFUTBidVolBook;
-
-  ulong mOrderRecentlyFilled = 0;
-  ulong mNextMessageId = 1;
-  boost::circular_buffer<float> sma_ask{26};
-  boost::circular_buffer<float> sma_bid{26};
-
-  // Id : (Side, price, vol, cancellable)
-  //  Orders (Bid // Ask)
-  std::unordered_map<
-      unsigned long,
-      std::tuple<ReadyTraderGo::Side, unsigned long, unsigned long, bool>>
-      mOrders;
-  //  Hedges (Buy // Sell)
-  std::unordered_map<
-      unsigned long,
-      std::tuple<ReadyTraderGo::Side, unsigned long, unsigned long, bool>>
-      mHedges;
 };
 
-#endif // CPPREADY_TRADER_GO_AUTOTRADER_H
+#endif  // CPPREADY_TRADER_GO_AUTOTRADER_H
